@@ -8,86 +8,179 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      - name: Checkout patch files
+      - name: Checkout workflow files
         uses: actions/checkout@v5
 
       - name: Build patched ReHLDS
+        shell: bash
         run: |
-          docker run --rm \
+          set -euo pipefail
+          
+          docker run --rm -i \
             -v "$PWD:/work" \
             -w /work \
-            ubuntu:20.04 \
-            bash -c '
-              set -eux
-
-              export DEBIAN_FRONTEND=noninteractive
-
-              apt-get update
-
-              apt-get install -y \
-                build-essential \
-                gcc \
-                g++ \
-                gcc-multilib \
-                g++-multilib \
-                libc6-dev \
-                libc6-dev-i386 \
-                cmake \
-                curl \
-                ca-certificates \
-                patch \
-                file \
-                binutils
-
-              echo "========================================"
-              echo " Downloading ReHLDS 3.14.0.857"
-              echo "========================================"
-
-              rm -rf /work/rehlds
-              mkdir -p /work/rehlds
-
-              curl -L --fail \
-                https://github.com/rehlds/ReHLDS/archive/refs/tags/3.14.0.857.tar.gz \
-                | tar -xz -C /work/rehlds --strip-components=1
-
-              cd /work/rehlds
-
-              echo "========================================"
-              echo " Applying FakeBot Auth patch"
-              echo "========================================"
-
-              patch -p1 --dry-run < /work/fakebot_status_v4.patch
-              patch -p1 < /work/fakebot_status_v4.patch
-
-              echo "========================================"
-              echo " Building Linux i386 engine"
-              echo "========================================"
-
-              chmod +x build.sh
-
-              ./build.sh \
-                --compiler=gcc \
-                --jobs=$(nproc) \
-                -DUSE_STATIC_LIBSTDC=ON
-
-              echo "========================================"
-              echo " Checking engine"
-              echo "========================================"
-
-              test -f build/rehlds/engine_i486.so
-
-              file build/rehlds/engine_i486.so
-
-              echo "--- GLIBCXX ---"
-              strings build/rehlds/engine_i486.so \
-                | grep -o "GLIBCXX_[0-9.]*" \
-                | sort -Vu || true
-
-              echo "--- GLIBC ---"
-              strings build/rehlds/engine_i486.so \
-                | grep -o "GLIBC_[0-9.]*" \
-                | sort -Vu || true
-            '
+            ubuntu:20.04 bash -s <<'BASH'
+          set -euxo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          
+          apt-get update
+          apt-get install -y \
+            build-essential \
+            gcc g++ \
+            gcc-multilib g++-multilib \
+            libc6-dev libc6-dev-i386 \
+            cmake curl ca-certificates \
+            python3 file binutils
+          
+          echo "========================================"
+          echo "Downloading ReHLDS 3.14.0.857"
+          echo "========================================"
+          
+          rm -rf /work/rehlds
+          mkdir -p /work/rehlds
+          
+          curl -L --fail \
+            https://github.com/rehlds/ReHLDS/archive/refs/tags/3.14.0.857.tar.gz \
+            | tar -xz -C /work/rehlds --strip-components=1
+          
+          cd /work/rehlds
+          
+          echo "========================================"
+          echo "Applying FakeBot Status + Auth changes"
+          echo "========================================"
+          
+          python3 <<'PYEDIT'
+          from pathlib import Path
+          
+          host_path = Path("rehlds/engine/host_cmd.cpp")
+          pr_path = Path("rehlds/engine/pr_cmds.cpp")
+          
+          host = host_path.read_text()
+          pr = pr_path.read_text()
+          
+          def replace_once(text, old, new, label):
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{label}: expected exactly 1 match, found {count}")
+              return text.replace(old, new, 1)
+          
+          marker = "SV_SAVEGAMECOMMENT_FUNC g_pSaveGameCommentFunc = &Host_SavegameComment;\n"
+          helper = marker + """
+          
+          // Stable fake Steam2 IDs for fake clients. The ID is derived from the bot
+          // name, so the same bot name keeps the same ID after reconnect/restart.
+          static char g_FakeBotSteamIds[MAX_CLIENTS][32] = {};
+          static char g_FakeBotSteamIdFallback[32] = \"STEAM_0:0:50000000\";
+          
+          static unsigned int Host_FakeBotFnv1a32(const char *text)
+          {
+          \tunsigned int hash = 2166136261u;
+          \tconst unsigned char *p = (const unsigned char *)text;
+          
+          \twhile (*p)
+          \t{
+          \t\thash ^= (unsigned int)(*p++);
+          \t\thash *= 16777619u;
+          \t}
+          
+          \treturn hash;
+          }
+          
+          char *Host_GetFakeBotSteamId(client_t *client)
+          {
+          \tint slot = (int)(client - g_psvs.clients);
+          \tif (slot < 0 || slot >= MAX_CLIENTS)
+          \t\treturn g_FakeBotSteamIdFallback;
+          
+          \tunsigned int account = Host_FakeBotFnv1a32(client->name) & 0x7FFFFFFFu;
+          \tif (account < 100000000u)
+          \t\taccount += 100000000u;
+          
+          \tunsigned int y = account & 1u;
+          \tunsigned int z = account >> 1;
+          
+          \tQ_snprintf(g_FakeBotSteamIds[slot], sizeof(g_FakeBotSteamIds[slot]),
+          \t\t\"STEAM_0:%u:%u\", y, z);
+          
+          \treturn g_FakeBotSteamIds[slot];
+          }
+          """
+          host = replace_once(host, marker, helper, "insert helper")
+          
+          old_status = (
+              '\t\tif (!client->fakeclient)\n'
+              '\t\t\tval = SV_GetClientIDString(client);\n'
+              '\t\telse val = "BOT";'
+          )
+          new_status = (
+              '\t\tif (client->fakeclient)\n'
+              '\t\t\tval = Host_GetFakeBotSteamId(client);\n'
+              '\t\telse\n'
+              '\t\t\tval = SV_GetClientIDString(client);'
+          )
+          host = replace_once(host, old_status, new_status, "Host_Status_f")
+          
+          old_formatted = (
+              '#ifdef REHLDS_FIXES\n'
+              '\t\t//TODO: I think it would be better if do the formatting for fakeclient as in Host_Status_f (in the original it there is no)\n'
+              '\t\tif (client->fakeclient)\n'
+              '\t\t\tszIDString = "BOT";\n'
+              '\t\telse\n'
+              '#endif // REHLDS_FIXES\n'
+              '\t\tszIDString = SV_GetClientIDString(client);'
+          )
+          new_formatted = (
+              '\t\tif (client->fakeclient)\n'
+              '\t\t\tszIDString = Host_GetFakeBotSteamId(client);\n'
+              '\t\telse\n'
+              '\t\t\tszIDString = SV_GetClientIDString(client);'
+          )
+          host = replace_once(host, old_formatted, new_formatted, "Host_Status_Formatted_f")
+          
+          include_marker = '#include "precompiled.h"\n'
+          include_new = include_marker + '\n// Shared with host_cmd.cpp so status and engine auth expose the same fake ID.\nextern char *Host_GetFakeBotSteamId(client_t *client);\n'
+          pr = replace_once(pr, include_marker, include_new, "pr_cmds extern")
+          
+          old_auth = (
+              '\t\tif (cl->fakeclient)\n'
+              '\t\t{\n'
+              '\t\t\tQ_strcpy(szAuthID[count], "BOT");\n'
+              '\t\t}'
+          )
+          new_auth = (
+              '\t\tif (cl->fakeclient)\n'
+              '\t\t{\n'
+              '\t\t\tQ_snprintf(szAuthID[count], sizeof(szAuthID[count]) - 1, "%s",\n'
+              '\t\t\t\tHost_GetFakeBotSteamId(cl));\n'
+              '\t\t}'
+          )
+          pr = replace_once(pr, old_auth, new_auth, "PF_GetPlayerAuthId")
+          
+          host_path.write_text(host)
+          pr_path.write_text(pr)
+          print("FakeBot Status + Auth source changes applied successfully.")
+          PYEDIT
+          
+          echo "========================================"
+          echo "Building Linux i386 legacy-compatible engine"
+          echo "========================================"
+          
+          chmod +x build.sh
+          ./build.sh --compiler=gcc --jobs="$(nproc)" -DUSE_STATIC_LIBSTDC=ON
+          
+          echo "========================================"
+          echo "Checking generated engine"
+          echo "========================================"
+          
+          test -f build/rehlds/engine_i486.so
+          file build/rehlds/engine_i486.so
+          
+          echo "--- GLIBCXX references ---"
+          strings build/rehlds/engine_i486.so | grep -o 'GLIBCXX_[0-9.]*' | sort -Vu || true
+          
+          echo "--- GLIBC references ---"
+          strings build/rehlds/engine_i486.so | grep -o 'GLIBC_[0-9.]*' | sort -Vu || true
+          BASH
 
       - name: Verify engine
         run: |
@@ -97,6 +190,6 @@ jobs:
       - name: Upload engine
         uses: actions/upload-artifact@v4
         with:
-          name: engine_i486-fakebot-auth
+          name: engine_i486-fakebot-auth-legacy
           path: rehlds/build/rehlds/engine_i486.so
           if-no-files-found: error
