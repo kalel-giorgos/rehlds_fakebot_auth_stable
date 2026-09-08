@@ -1,0 +1,99 @@
+diff --git a/rehlds/engine/host_cmd.cpp b/rehlds/engine/host_cmd.cpp
+--- a/rehlds/engine/host_cmd.cpp
++++ b/rehlds/engine/host_cmd.cpp
+@@ -44,6 +44,38 @@ char *g_pPostRestartCmdLineArgs;
+ int r_dointerp = 1;
+ 
+ SV_SAVEGAMECOMMENT_FUNC g_pSaveGameCommentFunc = &Host_SavegameComment;
++
++// Stable fake Steam2 IDs for fake clients.
++// Uses the same FNV-1a/name-based idea as YaPB fake SteamIDs, so a bot with
++// the same name keeps the same ID after reconnect/restart. The same helper
++// is also used by PF_GetPlayerAuthId(), so `status` and AMXX see one ID.
++static char g_FakeBotStatusIds[MAX_CLIENTS][32] = {};
++
++static unsigned int Host_FakeBotFnv1a32(const char *text)
++{
++	unsigned int hash = 2166136261u;
++	const unsigned char *p = (const unsigned char *)text;
++
++	while (*p)
++	{
++		hash ^= (unsigned int)(*p++);
++		hash *= 16777619u;
++	}
++
++	return hash;
++}
++
++const char *Host_GetFakeBotStatusId(client_t *client)
++{
++	int slot = (int)(client - g_psvs.clients);
++	if (slot < 0 || slot >= MAX_CLIENTS)
++		return "STEAM_0:1:256";
++
++	unsigned int botNameHash = Host_FakeBotFnv1a32(client->name);
++	unsigned int accountId = botNameHash & 0x00FFFF00u;
++
++	// Match YaPB's Steam2-style fake-ID layout: STEAM_0:1:<name hash mask>.
++	Q_snprintf(g_FakeBotStatusIds[slot], sizeof(g_FakeBotStatusIds[slot]),
++		"STEAM_0:1:%u", accountId);
++
++	return g_FakeBotStatusIds[slot];
++}
++
+ cvar_t voice_recordtofile = { "voice_recordtofile", "0", 0, 0.0f, NULL };
+ cvar_t voice_inputfromfile = { "voice_inputfromfile", "0", 0, 0.0f, NULL };
+ cvar_t gHostMap = { "HostMap", "C1A0", 0, 0.0f, NULL };
+@@ -624,9 +656,10 @@ void Host_Status_f(void)
+ 				minutes %= 60;
+ 		}
+ 
+-		if (!client->fakeclient)
+-			val = SV_GetClientIDString(client);
+-		else val = "BOT";
++		if (client->fakeclient)
++			val = Host_GetFakeBotStatusId(client);
++		else
++			val = SV_GetClientIDString(client);
+ 
+ 		Host_Status_Printf(conprint, log, "#%2i %8s %i %s", j + 1, va("\"%s\"", client->name), client->userid, val);
+ 		if (client->proxy)
+@@ -738,13 +771,10 @@ void Host_Status_Formatted_f(void)
+ 		else szRemoteAddr = "";
+ 
+-#ifdef REHLDS_FIXES
+-		//TODO: I think it would be better if do the formatting for fakeclient as in Host_Status_f (in the original it there is no)
+ 		if (client->fakeclient)
+-			szIDString = "BOT";
++			szIDString = (char *)Host_GetFakeBotStatusId(client);
+ 		else
+-#endif // REHLDS_FIXES
+-		szIDString = SV_GetClientIDString(client);
++			szIDString = SV_GetClientIDString(client);
+ 		Host_Status_Printf(conprint, log, "%-2.2s\t%-9.9s\t%-7.7s\t%-20.20s\t%-4.4s\t%-8.8s\t%-4.4s\t%-4.4s\t%-21.21s\n",
+ 			va("%-2i", j + 1),va("\"%s\"", client->name),va("%-7i", client->userid),szIDString,
+ 			va("%-4i", (int)client->edict->v.frags),sz,va("%-4i", SV_CalcPing(client)),va("%-4i", (int)client->packet_loss),szRemoteAddr);
+diff --git a/rehlds/engine/pr_cmds.cpp b/rehlds/engine/pr_cmds.cpp
+--- a/rehlds/engine/pr_cmds.cpp
++++ b/rehlds/engine/pr_cmds.cpp
+@@ -26,6 +26,9 @@
+  */
+ 
+ #include "precompiled.h"
++
++// Implemented in host_cmd.cpp. Shared with status so both expose one ID.
++extern const char *Host_GetFakeBotStatusId(client_t *client);
+ 
+ vec_t gHullMins[4][3] = {
+ 		{ 0.0f,   0.0f,   0.0f },
+@@ -2532,7 +2535,8 @@ const char* EXT_FUNC PF_GetPlayerAuthId(edict_t *e)
+ 
+ 		if (cl->fakeclient)
+ 		{
+-			Q_strcpy(szAuthID[count], "BOT");
++			Q_snprintf(szAuthID[count], sizeof(szAuthID[count]) - 1, "%s",
++				Host_GetFakeBotStatusId(cl));
+ 		}
+ //		AUTH_IDTYPE_LOCAL is handled inside SV_GetIDString(), no need to do it here
+ #ifndef REHLDS_FIXES
