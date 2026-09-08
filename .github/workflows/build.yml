@@ -30,7 +30,7 @@ jobs:
             gcc-multilib g++-multilib \
             libc6-dev libc6-dev-i386 \
             cmake curl ca-certificates \
-            python3 file binutils
+            python3 file binutils git
 
           echo "========================================"
           echo "Downloading ReHLDS 3.14.0.857"
