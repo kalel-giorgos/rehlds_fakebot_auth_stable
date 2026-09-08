@@ -8,74 +8,95 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      - name: Checkout helper files
-        uses: actions/checkout@v4
+      - name: Checkout patch files
+        uses: actions/checkout@v5
 
-      - name: Build ReHLDS inside Ubuntu 20.04
+      - name: Build patched ReHLDS
         run: |
           docker run --rm \
             -v "$PWD:/work" \
             -w /work \
             ubuntu:20.04 \
             bash -c '
-              set -e
+              set -eux
 
-              echo "=== Configure Ubuntu 20.04 repositories ==="
-              cat > /etc/apt/sources.list <<EOF2
-          deb http://archive.ubuntu.com/ubuntu focal main restricted universe multiverse
-          deb http://archive.ubuntu.com/ubuntu focal-updates main restricted universe multiverse
-          deb http://security.ubuntu.com/ubuntu focal-security main restricted universe multiverse
-          EOF2
+              export DEBIAN_FRONTEND=noninteractive
 
               apt-get update
 
-              echo "=== Install build dependencies ==="
-              DEBIAN_FRONTEND=noninteractive apt-get install -y \
+              apt-get install -y \
                 build-essential \
+                gcc \
+                g++ \
                 gcc-multilib \
                 g++-multilib \
                 libc6-dev \
                 libc6-dev-i386 \
                 cmake \
-                git \
+                curl \
                 ca-certificates \
-                file
+                patch \
+                file \
+                binutils
 
-              echo "=== Download exact ReHLDS 3.14.0.857 ==="
+              echo "========================================"
+              echo " Downloading ReHLDS 3.14.0.857"
+              echo "========================================"
+
               rm -rf /work/rehlds
-              git clone \
-                --depth 1 \
-                --branch 3.14.0.857 \
-                https://github.com/rehlds/ReHLDS.git \
-                /work/rehlds
+              mkdir -p /work/rehlds
+
+              curl -L --fail \
+                https://github.com/rehlds/ReHLDS/archive/refs/tags/3.14.0.857.tar.gz \
+                | tar -xz -C /work/rehlds --strip-components=1
 
               cd /work/rehlds
-              test "$(git rev-parse HEAD)" = "89958d348ea617227a4e4360b76900423527bd9e"
 
-              echo "=== Apply FakeBot Auth Stable patch ==="
-              git apply --check --ignore-whitespace /work/fakebot_status_v4.patch
-              git apply --ignore-whitespace /work/fakebot_status_v4.patch
+              echo "========================================"
+              echo " Applying FakeBot Auth patch"
+              echo "========================================"
 
-              echo "=== Build Linux i386 engine ==="
+              patch -p1 --dry-run < /work/fakebot_status_v4.patch
+              patch -p1 < /work/fakebot_status_v4.patch
+
+              echo "========================================"
+              echo " Building Linux i386 engine"
+              echo "========================================"
+
               chmod +x build.sh
-              ./build.sh --compiler=gcc --jobs=$(nproc)
 
-              echo "=== Verify engine ==="
-              file build/rehlds/engine_i486.so
+              ./build.sh \
+                --compiler=gcc \
+                --jobs=$(nproc) \
+                -DUSE_STATIC_LIBSTDC=ON
+
+              echo "========================================"
+              echo " Checking engine"
+              echo "========================================"
+
               test -f build/rehlds/engine_i486.so
 
-              echo "=== GLIBC requirements ==="
-              strings build/rehlds/engine_i486.so | grep -o "GLIBC_[0-9.]*" | sort -Vu || true
+              file build/rehlds/engine_i486.so
+
+              echo "--- GLIBCXX ---"
+              strings build/rehlds/engine_i486.so \
+                | grep -o "GLIBCXX_[0-9.]*" \
+                | sort -Vu || true
+
+              echo "--- GLIBC ---"
+              strings build/rehlds/engine_i486.so \
+                | grep -o "GLIBC_[0-9.]*" \
+                | sort -Vu || true
             '
 
-      - name: Check generated engine
+      - name: Verify engine
         run: |
-          file rehlds/build/rehlds/engine_i486.so
           test -f rehlds/build/rehlds/engine_i486.so
+          file rehlds/build/rehlds/engine_i486.so
 
-      - name: Upload Legacy Compatible engine
+      - name: Upload engine
         uses: actions/upload-artifact@v4
         with:
-          name: engine_i486-fakebot-auth-stable-3.14.0.857-legacy
+          name: engine_i486-fakebot-auth
           path: rehlds/build/rehlds/engine_i486.so
           if-no-files-found: error
