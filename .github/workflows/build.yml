@@ -49,7 +49,7 @@ jobs:
           echo "Applying FakeBot Status + Auth changes"
           echo "========================================"
 
-          python3 <<'PYEDIT'
+          cat > /tmp/patch_rehlds.py <<'PYEDIT'
           from pathlib import Path
 
           host_path = Path("rehlds/engine/host_cmd.cpp")
@@ -65,54 +65,55 @@ jobs:
               return text.replace(old, new, 1)
 
           marker = "SV_SAVEGAMECOMMENT_FUNC g_pSaveGameCommentFunc = &Host_SavegameComment;\n"
-          helper = marker + r'''
 
-// Stable fake Steam2 IDs for fake clients.
-// Same bot name => same fake SteamID after reconnect/restart.
-static char g_FakeBotSteamIds[MAX_CLIENTS][32];
-static char g_FakeBotSteamIdFallback[32] = "STEAM_0:0:50000000";
+          helper_code = r'''
+          // Stable fake Steam2 IDs for fake clients.
+          // Same bot name => same fake SteamID after reconnect/restart.
+          static char g_FakeBotSteamIds[MAX_CLIENTS][32];
+          static char g_FakeBotSteamIdFallback[32] = "STEAM_0:0:50000000";
 
-static unsigned int Host_FakeBotFnv1a32(const char *text)
-{
-    unsigned int hash = 2166136261u;
-    const unsigned char *p = (const unsigned char *)text;
+          static unsigned int Host_FakeBotFnv1a32(const char *text)
+          {
+              unsigned int hash = 2166136261u;
+              const unsigned char *p = (const unsigned char *)text;
 
-    while (*p)
-    {
-        hash ^= (unsigned int)(*p++);
-        hash *= 16777619u;
-    }
+              while (*p)
+              {
+                  hash ^= (unsigned int)(*p++);
+                  hash *= 16777619u;
+              }
 
-    return hash;
-}
+              return hash;
+          }
 
-const char *Host_GetFakeBotSteamId(client_t *client)
-{
-    int slot = (int)(client - g_psvs.clients);
+          const char *Host_GetFakeBotSteamId(client_t *client)
+          {
+              int slot = (int)(client - g_psvs.clients);
 
-    if (slot < 0 || slot >= MAX_CLIENTS)
-        return g_FakeBotSteamIdFallback;
+              if (slot < 0 || slot >= MAX_CLIENTS)
+                  return g_FakeBotSteamIdFallback;
 
-    unsigned int account = Host_FakeBotFnv1a32(client->name) & 0x7FFFFFFFu;
+              unsigned int account = Host_FakeBotFnv1a32(client->name) & 0x7FFFFFFFu;
 
-    if (account < 100000000u)
-        account += 100000000u;
+              if (account < 100000000u)
+                  account += 100000000u;
 
-    unsigned int y = account & 1u;
-    unsigned int z = account >> 1;
+              unsigned int y = account & 1u;
+              unsigned int z = account >> 1;
 
-    Q_snprintf(
-        g_FakeBotSteamIds[slot],
-        sizeof(g_FakeBotSteamIds[slot]),
-        "STEAM_0:%u:%u",
-        y,
-        z
-    );
+              Q_snprintf(
+                  g_FakeBotSteamIds[slot],
+                  sizeof(g_FakeBotSteamIds[slot]),
+                  "STEAM_0:%u:%u",
+                  y,
+                  z
+              );
 
-    return g_FakeBotSteamIds[slot];
-}
-'''
-          host = replace_once(host, marker, helper, "insert helper")
+              return g_FakeBotSteamIds[slot];
+          }
+          '''
+
+          host = replace_once(host, marker, marker + "\n" + helper_code, "insert helper")
 
           old_status = (
               '\t\tif (!client->fakeclient)\n'
@@ -127,28 +128,11 @@ const char *Host_GetFakeBotSteamId(client_t *client)
           )
           host = replace_once(host, old_status, new_status, "Host_Status_f")
 
-          old_formatted = (
-              '#ifdef REHLDS_FIXES\n'
-              '\t\t//TODO: I think it would be better if do the formatting for fakeclient as in Host_Status_f (in the original it there is no)\n'
-              '\t\tif (client->fakeclient)\n'
-              '\t\t\tszIDString = "BOT";\n'
-              '\t\telse\n'
-              '#endif // REHLDS_FIXES\n'
-              '\t\tszIDString = SV_GetClientIDString(client);'
-          )
-          new_formatted = (
-              '\t\tif (client->fakeclient)\n'
-              '\t\t\tszIDString = (char *)Host_GetFakeBotSteamId(client);\n'
-              '\t\telse\n'
-              '\t\t\tszIDString = SV_GetClientIDString(client);'
-          )
-          host = replace_once(host, old_formatted, new_formatted, "Host_Status_Formatted_f")
-
           include_marker = '#include "precompiled.h"\n'
           include_new = (
-              include_marker +
-              '\n// Implemented in host_cmd.cpp.\n'
-              'extern const char *Host_GetFakeBotSteamId(client_t *client);\n'
+              include_marker
+              + '\n// Implemented in host_cmd.cpp.\n'
+              + 'extern const char *Host_GetFakeBotSteamId(client_t *client);\n'
           )
           pr = replace_once(pr, include_marker, include_new, "pr_cmds extern")
 
@@ -173,8 +157,10 @@ const char *Host_GetFakeBotSteamId(client_t *client)
           print("FakeBot Status + Auth source changes applied successfully.")
           PYEDIT
 
+          python3 /tmp/patch_rehlds.py
+
           echo "========================================"
-          echo "Building Linux i386 (single job for clean errors)"
+          echo "Building Linux i386 - single job"
           echo "========================================"
 
           chmod +x build.sh
@@ -187,9 +173,7 @@ const char *Host_GetFakeBotSteamId(client_t *client)
           if [ "$BUILD_STATUS" -ne 0 ]; then
             echo
             echo "================ COMPILER ERRORS ================"
-            grep -nEi \
-              '(^|[^a-z])(error:|fatal error:|undefined reference|collect2:|ld: |make: \*\*\*)' \
-              /work/build.log | tail -n 120 || true
+            grep -nEi 'error:|fatal error:|undefined reference|collect2:|make: \*\*\*' /work/build.log | tail -n 120 || true
             echo
             echo "================ LAST 250 LINES ================="
             tail -n 250 /work/build.log || true
@@ -209,6 +193,7 @@ const char *Host_GetFakeBotSteamId(client_t *client)
           echo "--- GLIBC references ---"
           strings build/rehlds/engine_i486.so | grep -o 'GLIBC_[0-9.]*' | sort -Vu || true
           BASH
+
 
       - name: Upload build log
         if: always()
